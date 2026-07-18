@@ -1,0 +1,56 @@
+# IntelliResearch — .cursorrules
+# AI coding assistant rules for this project
+
+## Project Context
+This is a production-grade multi-agent AI research platform built with:
+- Python 3.11+ with strict type hints everywhere
+- FastAPI backend with async/await throughout
+- LangGraph for agent orchestration
+- Streamlit frontend
+- Clerk authentication
+
+## Code Quality Rules
+
+### Always
+- Add type hints to every function parameter and return type
+- Write docstrings for every class and function (Google style)
+- Use structured logging (never print statements)
+- Handle every exception explicitly — never use bare `except:`
+- Use pydantic models for all API request/response schemas
+- Keep functions under 50 lines — split into helpers if longer
+- Follow PEP 8 strictly (use ruff for linting)
+- Use constants from config.py — never hardcode values
+- Add inline comments for complex logic
+- Use `@dataclass` or `TypedDict` for data structures
+
+### Never
+- Never commit API keys or secrets
+- Never use `time.sleep()` in async code — use `asyncio.sleep()`
+- Never ignore return values from async functions
+- Never use `*` imports
+- Never skip error handling in agent nodes
+- Never use mutable default arguments
+
+### Naming Conventions
+- Classes: PascalCase
+- Functions/variables: snake_case
+- Constants: UPPER_SNAKE_CASE
+- Private methods: _leading_underscore
+- Type aliases: PascalCase with Type suffix
+
+### Agent Node Rules
+- Every agent node must return a dict with at least `events` key
+- Emit progress events via `emit_event()` before and after processing
+- Wrap all LLM calls in try/except with structured error return
+- Log token usage on every LLM call
+
+### Testing Rules
+- Write a test for every agent node function
+- Mock all external API calls in tests
+- Use pytest fixtures for shared state
+- Test both happy path and error cases
+
+## File Organisation
+- One class per file where possible
+- Group related utilities in utils/
+- Never put business logic in route handlers — use service layer
