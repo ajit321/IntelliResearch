@@ -5,7 +5,6 @@ Handles model routing, token logging, structured outputs, and error recovery.
 """
 
 import json
-from typing import Any
 
 from litellm import acompletion
 from pydantic import BaseModel
@@ -168,10 +167,10 @@ async def call_llm_structured(
 
 def get_model_for_task(task_type: str) -> str:
     """
-    Select the optimal model based on the agent task type.
+    Return the configured OpenRouter model for an agent task.
 
-    Smart model routing: fast cheap models for retrieval/simple tasks,
-    powerful models for analysis and reasoning.
+    A single configured model avoids stale provider-specific model IDs and
+    makes cost/access behavior predictable for local installations.
 
     Args:
         task_type: One of 'retrieval', 'analysis', 'reasoning', 'judge'.
@@ -179,13 +178,6 @@ def get_model_for_task(task_type: str) -> str:
     Returns:
         LiteLLM model string for OpenRouter.
     """
-    model_map: dict[str, str] = {
-        "retrieval": "openrouter/openai/gpt-4o-mini",       # Fast + cheap
-        "analysis":  "openrouter/openai/gpt-4o",            # Accurate
-        "reasoning": "openrouter/anthropic/claude-3.5-sonnet", # Best reasoning
-        "judge":     "openrouter/openai/gpt-4o",            # Reliable scoring
-        "default":   settings.llm_model,
-    }
-    selected = model_map.get(task_type, model_map["default"])
+    selected = settings.llm_model
     logger.debug("Model selected for task", task_type=task_type, model=selected)
     return selected

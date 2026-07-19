@@ -32,6 +32,29 @@ settings = get_settings()
 # Active session event queues for WebSocket streaming
 _session_queues: dict[str, asyncio.Queue] = {}
 
+
+async def _publish_graph_update(session_id: str, update: dict[str, Any]) -> None:
+    """Publish serialisable node output to a session's WebSocket queue."""
+    queue = _session_queues.get(session_id)
+    if queue is None:
+        return
+
+    for node, node_update in update.items():
+        if not isinstance(node_update, dict):
+            continue
+
+        payload: dict[str, Any] = {
+            "type": "state_update",
+            "node": node,
+            "events": node_update.get("events", []),
+            "sources": node_update.get("sources", []),
+        }
+        for key in ("progress", "report", "quality_score"):
+            if key in node_update:
+                payload[key] = node_update[key]
+
+        await queue.put(payload)
+
 # Rate limiter (slowapi)
 _limiter = Limiter(key_func=get_remote_address)
 
@@ -188,8 +211,9 @@ async def create_research_session(
 @app.post("/api/v1/research/{session_id}/run", status_code=status.HTTP_202_ACCEPTED, tags=["Research"])
 async def run_research_session(
     session_id: str,
-    request: ResearchRequest,
     current_user: CurrentUser,
+    query: Annotated[str, Form(min_length=3, max_length=5000)],
+    depth: Annotated[str, Form(pattern="^(quick|deep|expert)$")] = "deep",
     documents: list[UploadFile] = File(default=[]),
 ) -> dict[str, str]:
     """
@@ -199,7 +223,8 @@ async def run_research_session(
 
     Args:
         session_id: Session ID from create_research_session.
-        request: Research query and depth.
+        query: Research query submitted as multipart form data.
+        depth: Requested research depth.
         current_user: Authenticated user.
         documents: Optional list of uploaded files.
 
@@ -228,15 +253,34 @@ async def run_research_session(
         try:
             await run_research(
                 session_id=session_id,
-                query=sanitise_query(request.query),
-                depth=request.depth,
+                query=sanitise_query(query),
+                depth=depth,
                 user_id=current_user.user_id,
                 uploaded_docs=uploaded_texts,
+                on_update=lambda update: _publish_graph_update(session_id, update),
             )
+
+            final_state = await research_graph.aget_state(
+                {"configurable": {"thread_id": session_id}}
+            )
+            values = dict(final_state.values)
+            q = _session_queues.get(session_id)
+            if q is not None:
+                await q.put({
+                    "type": "hitl_required" if final_state.next else "report_ready",
+                    "report": values.get("report"),
+                    "quality_score": values.get("quality_score"),
+                    "sources": values.get("sources", []),
+                    "progress": values.get("progress", 100),
+                })
         except Exception as exc:
             q = _session_queues.get(session_id)
-            if q:
-                await q.put({"type": "fatal_error", "error": str(exc)})
+            if q is not None:
+                await q.put({
+                    "type": "fatal_error",
+                    "error": str(exc),
+                    "message": "Research failed. Check the backend terminal for details.",
+                })
             logger.error("Graph execution failed", session_id=session_id, error=str(exc))
 
     asyncio.create_task(_run_graph())
@@ -284,9 +328,10 @@ async def submit_hitl_decision(
     )
 
     return {
-        "status":   "resumed",
+        "status":   "finalised" if request.approved else "awaiting_review",
         "approved": request.approved,
         "report":   final_state.get("report"),
+        "quality_score": final_state.get("quality_score"),
     }
 
 
@@ -347,7 +392,7 @@ async def websocket_stream(ws: WebSocket, session_id: str) -> None:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=120.0)
                 await ws.send_json(event)
-                if event.get("type") in ("report_ready", "fatal_error"):
+                if event.get("type") in ("hitl_required", "report_ready", "fatal_error"):
                     break
             except asyncio.TimeoutError:
                 # Send keepalive ping every 120s to prevent timeout

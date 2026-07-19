@@ -4,9 +4,10 @@ Unit tests for agent nodes using mocked LLM calls.
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from app.agents.state import ResearchState
+from app.config import get_settings
 
 
 def _make_state(**overrides) -> ResearchState:
@@ -41,6 +42,15 @@ def _make_state(**overrides) -> ResearchState:
     return base
 
 
+def test_all_agent_tasks_use_configured_model() -> None:
+    """Task routing must not silently select retired provider model IDs."""
+    from app.utils.llm import get_model_for_task
+
+    configured_model = get_settings().llm_model
+    for task_type in ("retrieval", "analysis", "reasoning", "judge", "unknown"):
+        assert get_model_for_task(task_type) == configured_model
+
+
 class TestPlannerNode:
     """Tests for the Planner Agent node."""
 
@@ -48,13 +58,6 @@ class TestPlannerNode:
     async def test_planner_returns_plan(self) -> None:
         """Planner should return research_plan and agent_tasks."""
         from app.agents.planner import planner_node
-
-        mock_plan = (
-            '{"sub_questions": ["What is AI?", "What are the trends?"], '
-            '"agent_assignments": {"paper_agent": ["What is AI?"], '
-            '"news_agent": ["What are the trends?"], "market_agent": [], "user_docs_agent": []}, '
-            '"reasoning": "Test reasoning", "estimated_depth": "quick"}'
-        )
 
         with patch("app.agents.planner.call_llm_structured") as mock_llm:
             from app.agents.planner import ResearchPlan

@@ -6,12 +6,13 @@ Multi-Agent AI Research Platform
 
 import asyncio
 import json
-import uuid
+import os
 from datetime import datetime
 from typing import Any
 
 import httpx
 import streamlit as st
+from websockets.asyncio.client import connect as websocket_connect
 
 # ── Page Configuration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -25,8 +26,153 @@ st.set_page_config(
     },
 )
 
-BACKEND_URL: str = "http://localhost:8000"
+BACKEND_URL: str = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 API_BASE: str    = f"{BACKEND_URL}/api/v1"
+
+
+def _api_headers() -> dict[str, str]:
+    """Return an auth header when the user has a Clerk token."""
+    token = st.session_state.get("auth_token")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _raise_backend_error(response: httpx.Response) -> None:
+    """Raise a readable error for a failed backend response."""
+    if not response.is_error:
+        return
+    try:
+        detail = response.json().get("detail", response.text)
+    except (ValueError, AttributeError):
+        detail = response.text
+    raise RuntimeError(f"Backend returned {response.status_code}: {detail}")
+
+
+def _merge_sources(incoming: list[dict[str, Any]]) -> None:
+    """Append newly streamed sources without duplicating them."""
+    existing = {
+        (source.get("url", ""), source.get("title", ""))
+        for source in st.session_state.sources
+    }
+    for source in incoming:
+        identity = (source.get("url", ""), source.get("title", ""))
+        if identity not in existing:
+            st.session_state.sources.append(source)
+            existing.add(identity)
+
+
+def _apply_stream_message(message: dict[str, Any], status_box: Any) -> bool:
+    """Apply one WebSocket message and return True when streaming is done."""
+    message_type = message.get("type")
+
+    if message_type == "ping":
+        return False
+
+    for event in message.get("events", []):
+        st.session_state.events.append(event)
+        agent = event.get("agent", "system")
+        action = event.get("action", "")
+        if action == "started":
+            st.session_state.agent_states[agent] = "running"
+        elif action in {"completed", "skipped"}:
+            st.session_state.agent_states[agent] = "done"
+        status_box.write(event.get("message", f"{agent}: {action}"))
+
+    _merge_sources(message.get("sources", []))
+
+    progress = message.get("progress")
+    if isinstance(progress, (int, float)):
+        st.session_state.progress = max(st.session_state.progress, int(progress))
+
+    if message.get("report") is not None:
+        st.session_state.report = message["report"]
+    if message.get("quality_score") is not None:
+        st.session_state.quality_score = message["quality_score"]
+
+    if message_type == "hitl_required":
+        st.session_state.is_researching = False
+        st.session_state.awaiting_hitl = True
+        status_box.update(label="Draft report ready for review", state="complete")
+        return True
+
+    if message_type == "report_ready":
+        st.session_state.progress = 100
+        st.session_state.is_researching = False
+        st.session_state.awaiting_hitl = False
+        status_box.update(label="Research report complete", state="complete")
+        return True
+
+    if message_type == "fatal_error":
+        error = message.get("error") or message.get("message") or "Unknown backend error"
+        st.session_state.error_message = str(error)
+        st.session_state.is_researching = False
+        status_box.update(label="Research failed", state="error")
+        return True
+
+    return False
+
+
+async def _create_and_stream_research(
+    query: str,
+    depth: str,
+    uploaded_files: list[Any],
+    status_box: Any,
+) -> None:
+    """Create a backend session, start it, and consume streamed graph updates."""
+    timeout = httpx.Timeout(120.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout, headers=_api_headers()) as client:
+        create_response = await client.post(
+            f"{API_BASE}/research",
+            json={"query": query, "depth": depth},
+        )
+        _raise_backend_error(create_response)
+        session = create_response.json()
+        session_id = session["session_id"]
+        st.session_state.session_id = session_id
+        status_box.write("Backend session created. Connecting to the live feed...")
+
+        async with websocket_connect(
+            session["ws_url"],
+            open_timeout=10,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as websocket:
+            files = [
+                (
+                    "documents",
+                    (
+                        uploaded.name,
+                        uploaded.getvalue(),
+                        uploaded.type or "application/octet-stream",
+                    ),
+                )
+                for uploaded in uploaded_files
+            ]
+            run_response = await client.post(
+                f"{API_BASE}/research/{session_id}/run",
+                data={"query": query, "depth": depth},
+                files=files,
+            )
+            _raise_backend_error(run_response)
+            status_box.write("Research agents started.")
+
+            while True:
+                raw_message = await asyncio.wait_for(websocket.recv(), timeout=150)
+                message = json.loads(raw_message)
+                if _apply_stream_message(message, status_box):
+                    break
+
+
+def _submit_hitl_decision(approved: bool, feedback: str = "") -> dict[str, Any]:
+    """Submit a human review decision and return the updated report state."""
+    session_id = st.session_state.session_id
+    response = httpx.post(
+        f"{API_BASE}/research/{session_id}/hitl",
+        json={"approved": approved, "feedback": feedback},
+        headers=_api_headers(),
+        timeout=180.0,
+    )
+    _raise_backend_error(response)
+    return response.json()
 
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -106,6 +252,7 @@ def _init_state() -> None:
         "agent_states":     {},
         "progress":         0,
         "awaiting_hitl":    False,
+        "error_message":    None,
         "auth_token":       None,
         "user_name":        "Demo User",
     }
@@ -243,20 +390,40 @@ with st.container():
 
 
 # ── Launch Logic ──────────────────────────────────────────────────────────────
-if launch and query.strip():
-    # Reset state
-    st.session_state.events          = []
-    st.session_state.sources         = []
-    st.session_state.report          = None
-    st.session_state.quality_score   = None
-    st.session_state.agent_states    = {}
-    st.session_state.progress        = 0
-    st.session_state.awaiting_hitl   = False
-    st.session_state.is_researching  = True
-    st.session_state.session_id      = str(uuid.uuid4())
+if launch:
+    if not query.strip():
+        st.warning("Enter a research query before launching.")
+    else:
+        st.session_state.events          = []
+        st.session_state.sources         = []
+        st.session_state.report          = None
+        st.session_state.quality_score   = None
+        st.session_state.agent_states    = {}
+        st.session_state.progress        = 0
+        st.session_state.awaiting_hitl   = False
+        st.session_state.error_message   = None
+        st.session_state.is_researching  = True
+        st.session_state.session_id      = None
 
-    # Simulate demo mode with fake events if backend unreachable
-    st.rerun()
+        with st.status("Starting research...", expanded=True) as status_box:
+            try:
+                asyncio.run(
+                    _create_and_stream_research(
+                        query=query.strip(),
+                        depth=depth,
+                        uploaded_files=uploaded_files or [],
+                        status_box=status_box,
+                    )
+                )
+            except Exception as exc:
+                st.session_state.error_message = str(exc)
+                st.session_state.is_researching = False
+                status_box.update(label="Research failed", state="error")
+                status_box.write(str(exc))
+        st.rerun()
+
+if st.session_state.error_message:
+    st.error(st.session_state.error_message)
 
 
 # ── Live Results Area ─────────────────────────────────────────────────────────
@@ -387,12 +554,31 @@ if st.session_state.is_researching or st.session_state.report:
             hcol1, hcol2 = st.columns(2)
             with hcol1:
                 if st.button("✅ Approve Report", type="primary", use_container_width=True):
-                    st.success("Report approved! Finalising...")
-                    st.session_state.awaiting_hitl = False
+                    try:
+                        with st.spinner("Finalising report..."):
+                            result = _submit_hitl_decision(approved=True)
+                        st.session_state.report = result.get("report") or st.session_state.report
+                        st.session_state.quality_score = result.get("quality_score") or st.session_state.quality_score
+                        st.session_state.awaiting_hitl = False
+                        st.success("Report approved and finalised.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
             with hcol2:
                 if st.button("🔄 Request Revision", use_container_width=True):
                     if hitl_feedback.strip():
-                        st.warning("Revision requested — agents will revise the report...")
-                        st.session_state.awaiting_hitl = False
+                        try:
+                            with st.spinner("Agents are revising the report..."):
+                                result = _submit_hitl_decision(
+                                    approved=False,
+                                    feedback=hitl_feedback.strip(),
+                                )
+                            st.session_state.report = result.get("report") or st.session_state.report
+                            st.session_state.quality_score = result.get("quality_score") or st.session_state.quality_score
+                            st.session_state.awaiting_hitl = True
+                            st.success("Revised draft ready for review.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
                     else:
                         st.error("Please provide feedback before requesting revision.")

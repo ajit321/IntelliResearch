@@ -109,6 +109,9 @@ ipython_config.py
 #   Do not commit your local dependencies to GitHub.
 .env
 .venv
+.python/
+.uv-cache/
+.run/
 env/
 venv/
 ENV/

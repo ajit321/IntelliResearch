@@ -9,6 +9,11 @@ import operator
 from typing_extensions import TypedDict
 
 
+def keep_highest_progress(current: int, update: int) -> int:
+    """Merge concurrent progress updates without moving progress backwards."""
+    return max(current, update)
+
+
 class SourceDoc(TypedDict):
     """A retrieved source document from any data source."""
     title: str
@@ -120,7 +125,7 @@ class ResearchState(TypedDict):
 
     # ── Streaming / progress ──────────────────────────────────
     events: Annotated[list[AgentEvent], operator.add]
-    progress: int                      # 0 – 100
+    progress: Annotated[int, keep_highest_progress]  # 0 – 100
     error: Optional[str]               # Last error message
 
     # ── Cache ─────────────────────────────────────────────────

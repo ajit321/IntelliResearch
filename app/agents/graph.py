@@ -10,6 +10,8 @@ Implements:
 - MemorySaver for checkpoint persistence and time travel
 """
 
+from typing import Any, Awaitable, Callable
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -142,10 +144,10 @@ def build_graph() -> StateGraph:
     graph.add_edge("planner",      "user_docs_agent")
 
     # ── Retrieval → Analysis (all four must complete first) ──
-    graph.add_edge("paper_agent",     "analysis_agent")
-    graph.add_edge("news_agent",      "analysis_agent")
-    graph.add_edge("market_agent",    "analysis_agent")
-    graph.add_edge("user_docs_agent", "analysis_agent")
+    graph.add_edge(
+        ["paper_agent", "news_agent", "market_agent", "user_docs_agent"],
+        "analysis_agent",
+    )
 
     # ── Linear analysis pipeline ──────────────────────────────
     graph.add_edge("analysis_agent",  "insight_agent")
@@ -216,6 +218,7 @@ async def run_research(
     depth: str = "deep",
     user_id: str = "anonymous",
     uploaded_docs: list[str] | None = None,
+    on_update: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict:
     """
     Execute the full multi-agent research pipeline.
@@ -226,6 +229,7 @@ async def run_research(
         depth: Research depth — quick | deep | expert.
         user_id: Authenticated user ID from Clerk.
         uploaded_docs: List of raw text from user-uploaded documents.
+        on_update: Optional async callback invoked for each graph node update.
 
     Returns:
         Final pipeline state dict containing the completed report.
@@ -267,8 +271,16 @@ async def run_research(
         user_id=user_id,
     )
 
-    final_state = await research_graph.ainvoke(initial_state, config=config)
-    return final_state
+    async for update in research_graph.astream(
+        initial_state,
+        config=config,
+        stream_mode="updates",
+    ):
+        if on_update is not None:
+            await on_update(update)
+
+    snapshot = await research_graph.aget_state(config)
+    return dict(snapshot.values)
 
 
 async def resume_after_hitl(

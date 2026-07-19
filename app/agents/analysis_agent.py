@@ -170,7 +170,7 @@ Analyse these sources thoroughly."""
     return {
         "summaries":           [result.summary],
         "contradictions":      contradictions,
-        "correction_loop_count": loop_count + (1 if loop_count > 0 else 0),
+        "correction_loop_count": loop_count + (1 if state.get("needs_correction") else 0),
         "events":              [start_event, done_event],
         "progress":            55,
     }

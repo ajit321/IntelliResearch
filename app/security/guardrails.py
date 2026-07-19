@@ -33,7 +33,10 @@ _INJECTION_PATTERNS: list[re.Pattern] = [
 
 # Patterns for potentially harmful content requests
 _HARMFUL_PATTERNS: list[re.Pattern] = [
-    re.compile(r"how\s+to\s+(make|build|create)\s+(bomb|weapon|malware|virus)", re.IGNORECASE),
+    re.compile(
+        r"how\s+to\s+(make|build|create)\s+(?:a\s+)?(bomb|weapon|malware|virus)",
+        re.IGNORECASE,
+    ),
     re.compile(r"(synthesize|manufacture)\s+(drug|chemical\s+weapon)", re.IGNORECASE),
 ]
 
